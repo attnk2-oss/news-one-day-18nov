@@ -4,32 +4,38 @@
 [![rank](https://make.fun/badge/news-image-20261118/attnk2-oss/news-one-day-18nov/rank.svg)](https://make.fun/bounty/news-image-20261118/leaderboard)
 [![reward](https://make.fun/badge/news-image-20261118/attnk2-oss/news-one-day-18nov/reward.svg)](https://make.fun/bounty/news-image-20261118)
 
-A front page for Wednesday, 18 November 2026, held as one 1024x1024 PNG.
-Thirty-nine stories fill three tiers: three lead cards carry the biggest news
-of the day, twelve compact cards cover the rest of the world, and twenty-four
-one-line items run in three columns of eight beside a world map whose fifteen
-numbered dots match the cards above them.
+Wednesday, 18 November 2026, pressed into one square picture. Thirty-nine
+stories are ranked by weight: three lead cards carry the day's biggest news,
+twelve compact cards take the next band, and twenty-four single lines fill
+three columns of eight beside a world map, whose fifteen red dots answer to
+the numbered cards above.
 
-Every story happened, or was first reported, on 18 November 2026; anything
-that could not be dated to that day twice was left out. The illustrations are
-original vector-style geometry drawn for this page, not clip art, so each card
-shows the event it describes. Contested claims are attributed, and the day's
-sources are named in the footer.
+The picture is deliberately a newspaper and not a poster. A reader who missed
+the day should be able to start at the three leads - a Gulf war widening, the
+first AI lab to list, three powers staging a summit - and then travel down
+through the compact cards and the column index without meeting a story that
+does not belong to that Wednesday. Anything that could not be dated to the day
+from two independent reports was dropped rather than softened into filler.
 
-## How the program behaves
+Each card is drawn, not borrowed: the tanker, the collapsed bridge, the chip,
+the gavel and the rest are original geometry in a four-colour ink-and-cream
+palette. Contested claims are attributed, and the sources behind the day are
+listed along the bottom edge.
+
+## Running it
 
 ```
-python3 main.py                # /output/entry.png
-python3 main.py /tmp/page.png  # any path
+python3 main.py                # writes /output/entry.png
+python3 main.py /tmp/day.png   # writes wherever it is told
 ```
 
-Before copying, `main.py` reads the eight signature bytes, unpacks the IHDR to
-confirm a square canvas inside the 1024-pixel side and 1 MiB caps, checks that
-the colour type and bit depth are a legal PNG pair, walks every chunk to verify
-its CRC and requires an empty IEND. It then writes through a temporary file in
-the target directory, swaps it into place, and re-reads the copy to compare its
-IHDR and sha256 with the source. The standard library is the only dependency,
-no network is touched, and two runs write the same bytes.
+`main.py` treats the file as a PNG rather than as bytes: it checks the eight
+opening bytes, reads the image header for the canvas and pixel format, refuses
+a file past 1 MiB or 1,024 pixels a side or one that is not square, recomputes
+every chunk checksum, and requires the chain to end on an empty IEND. The copy
+is made under a scratch name in the destination folder and renamed into place,
+then hashed and headed-checked against the original. Standard library only, no
+network, and two runs agree byte for byte.
 
 ---
 
