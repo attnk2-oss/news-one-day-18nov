@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Ship the one-day news front page for make.fun's news-image bounty.
+"""Ship the 18 November 2026 front page as the single PNG the contest expects.
 
-entry.png sits next to this file. The grader mounts the repository read-only
-at /bot with a writable /output, so the picture is found from __file__ and the
-destination comes from argv[1], defaulting to /output/entry.png.
+The grader mounts this repository read-only at /bot and hands the entry a
+writable /output, so the picture is resolved next to this file and the copy is
+written to argv[1], or to /output/entry.png when no path is given.
 
-The check is deliberately strict: eight magic bytes, an IHDR that describes a
-square image inside the 1 MiB and 1024-pixel caps, a CRC on every chunk, and
-an IEND that closes the stream. The copy goes through a temporary file in the
-target directory and is hashed again before the manifest is printed.
+The picture is checked as a picture before it is copied. The eight signature
+bytes must open the file, the IHDR must describe a square canvas inside the
+contest's 1024-pixel side and 1 MiB size caps, every chunk's CRC must match
+its own contents, and the stream must close on an empty IEND. The copy is made
+through a temporary file in the destination directory, then read back and
+hashed, so a short or rewritten file can never be reported as shipped.
+
+The standard library is the only dependency, no network is touched, and two
+runs of the same program write byte-identical output.
 """
 
 import hashlib
@@ -18,81 +23,90 @@ import sys
 import tempfile
 import zlib
 
-MAGIC = b"\x89PNG\r\n\x1a\n"
-CAP_BYTES = 1048576
-CAP_SIDE = 1024
+SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_BYTES = 1048576
+MAX_SIDE = 1024
 PICTURE = "entry.png"
-DEFAULT_TARGET = "/output/entry.png"
-STEP = 1 << 16
+DEFAULT_OUTPUT = "/output/entry.png"
+BLOCK = 1 << 16
+HEADER = 33
+
+# The PNG specification fixes which bit depths each colour type may carry.
+LEGAL_DEPTHS = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
 
 
-def load_picture(path):
-    """Read the file and return (blob, width, height, depth, colour type)."""
+def read_picture(path):
+    """Return the whole file plus the five fields the IHDR carries."""
     with open(path, "rb") as handle:
         blob = handle.read()
-    if len(blob) < 33 or blob[:8] != MAGIC:
-        raise ValueError("not a PNG: the 8-byte signature is missing")
-    width, height, depth, colour = struct.unpack(">IIBB", blob[16:26])
-    if not width or not height:
-        raise ValueError("IHDR describes an empty %dx%d canvas" % (width, height))
+    if len(blob) < HEADER or blob[:8] != SIGNATURE:
+        raise ValueError("not a PNG: the eight-byte signature is missing")
+    width, height, depth, colour, compression = struct.unpack(">IIBBB", blob[16:27])
+    if width == 0 or height == 0:
+        raise ValueError("the IHDR describes an empty %dx%d canvas" % (width, height))
+    if compression != 0:
+        raise ValueError("the IHDR names compression method %d; only 0 exists" % compression)
+    if colour not in LEGAL_DEPTHS or depth not in LEGAL_DEPTHS[colour]:
+        raise ValueError("colour type %d cannot carry a bit depth of %d" % (colour, depth))
     return blob, width, height, depth, colour
 
 
 def enforce_caps(size, width, height):
-    """Refuse anything the contest would refuse, and say which cap broke."""
-    if size > CAP_BYTES:
-        raise ValueError("file is %d bytes; the contest allows %d" % (size, CAP_BYTES))
-    if width > CAP_SIDE or height > CAP_SIDE:
-        raise ValueError("canvas is %dx%d; the contest allows %d a side"
-                         % (width, height, CAP_SIDE))
+    """Refuse anything the contest refuses, naming the cap that broke."""
+    if size > MAX_BYTES:
+        raise ValueError("the file is %d bytes; the contest allows %d" % (size, MAX_BYTES))
+    if width > MAX_SIDE or height > MAX_SIDE:
+        raise ValueError("the canvas is %dx%d; the contest allows %d a side"
+                         % (width, height, MAX_SIDE))
     if width != height:
-        raise ValueError("canvas is %dx%d; the contest wants a square" % (width, height))
+        raise ValueError("the canvas is %dx%d; the contest asks for a square" % (width, height))
 
 
-def walk_chunks(blob):
-    """Count chunks, verifying each length and CRC; stop at a clean IEND."""
-    cursor = 8
-    count = 0
+def scan_chunks(blob):
+    """Walk every chunk, checking its length and CRC, and stop at a clean IEND."""
     total = len(blob)
+    cursor = 8
+    seen = 0
     while True:
         if cursor + 12 > total:
-            raise ValueError("the stream stops at byte %d with no IEND" % cursor)
+            raise ValueError("the stream ends at byte %d without an IEND" % cursor)
         length = struct.unpack(">I", blob[cursor:cursor + 4])[0]
         kind = blob[cursor + 4:cursor + 8]
+        end = cursor + 12 + length
+        if end > total:
+            raise ValueError("the chunk %r at byte %d runs past the file" % (kind, cursor))
         body = blob[cursor + 8:cursor + 8 + length]
-        tail = cursor + 12 + length
-        if tail > total:
-            raise ValueError("chunk %r at byte %d runs past the file" % (kind, cursor))
-        stored = struct.unpack(">I", blob[cursor + 8 + length:tail])[0]
+        stored = struct.unpack(">I", blob[cursor + 8 + length:end])[0]
         if zlib.crc32(kind + body) & 0xFFFFFFFF != stored:
-            raise ValueError("chunk %r at byte %d has a bad CRC" % (kind, cursor))
-        count += 1
+            raise ValueError("the chunk %r at byte %d fails its CRC" % (kind, cursor))
+        seen += 1
         if kind == b"IEND":
             if length != 0:
-                raise ValueError("IEND carries %d bytes; it must carry none" % length)
-            return count
-        cursor = tail
+                raise ValueError("the IEND carries %d bytes; it must carry none" % length)
+            return seen
+        cursor = end
 
 
-def hash_file(path):
+def digest_of(path):
+    """Hash a file in fixed-size blocks so a big picture never sits in memory twice."""
     running = hashlib.sha256()
     with open(path, "rb") as handle:
         while True:
-            piece = handle.read(STEP)
+            piece = handle.read(BLOCK)
             if not piece:
                 break
             running.update(piece)
     return running.hexdigest()
 
 
-def copy_via_temp(source, target):
-    """Write target atomically: temp file beside it, fsync, then replace."""
+def place_atomically(source, target):
+    """Copy source to target without ever exposing a half-written target."""
     folder = os.path.dirname(os.path.abspath(target))
-    fd, scratch = tempfile.mkstemp(dir=folder, prefix=".ship-", suffix=".part")
+    handle, scratch = tempfile.mkstemp(dir=folder, prefix=".ship-", suffix=".part")
     try:
-        with os.fdopen(fd, "wb") as out, open(source, "rb") as src:
+        with os.fdopen(handle, "wb") as out, open(source, "rb") as src:
             while True:
-                piece = src.read(STEP)
+                piece = src.read(BLOCK)
                 if not piece:
                     break
                 out.write(piece)
@@ -100,6 +114,11 @@ def copy_via_temp(source, target):
             os.fsync(out.fileno())
         os.chmod(scratch, 0o644)
         os.replace(scratch, target)
+        folder_fd = os.open(folder, os.O_RDONLY)
+        try:
+            os.fsync(folder_fd)
+        finally:
+            os.close(folder_fd)
     except BaseException:
         try:
             os.unlink(scratch)
@@ -109,32 +128,36 @@ def copy_via_temp(source, target):
 
 
 def main(argv):
-    target = argv[1] if len(argv) > 1 else DEFAULT_TARGET
+    target = argv[1] if len(argv) > 1 else DEFAULT_OUTPUT
     source = os.path.join(os.path.dirname(os.path.abspath(__file__)), PICTURE)
 
     try:
-        blob, width, height, depth, colour = load_picture(source)
+        blob, width, height, depth, colour = read_picture(source)
         enforce_caps(len(blob), width, height)
-        chunks = walk_chunks(blob)
+        chunks = scan_chunks(blob)
 
         os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
-        copy_via_temp(source, target)
+        place_atomically(source, target)
 
-        before = hashlib.sha256(blob).hexdigest()
-        after = hash_file(target)
-        if before != after:
-            raise ValueError("hash changed in transit: %s -> %s" % (before, after))
-        if os.path.getsize(target) != len(blob):
-            raise ValueError("copy is %d bytes; the source is %d"
-                             % (os.path.getsize(target), len(blob)))
+        expected = hashlib.sha256(blob).hexdigest()
+        written = digest_of(target)
+        if expected != written:
+            raise ValueError("the hash changed on the way: %s became %s" % (expected, written))
+        grown = os.path.getsize(target)
+        if grown != len(blob):
+            raise ValueError("the copy is %d bytes; the source is %d" % (grown, len(blob)))
+        _, again_w, again_h, again_depth, again_colour = read_picture(target)
+        if (again_w, again_h, again_depth, again_colour) != (width, height, depth, colour):
+            raise ValueError("the copy's IHDR does not describe the source's canvas")
 
         print("picture    %s" % source)
-        print("bytes      %d" % len(blob))
-        print("canvas     %dx%d, depth %d, colour %d" % (width, height, depth, colour))
-        print("chunks     %d, all CRCs good, IEND clean" % chunks)
+        print("bytes      %d of %d allowed" % (len(blob), MAX_BYTES))
+        print("canvas     %dx%d, depth %d, colour type %d" % (width, height, depth, colour))
+        print("chunks     %d, every CRC good, IEND empty" % chunks)
         print("target     %s" % target)
-        print("sha256     %s" % after)
-        print("result     valid PNG, byte-identical copy, inside every cap")
+        print("sha256     %s" % written)
+        print("verify     the copy re-reads as the same %dx%d canvas" % (again_w, again_h))
+        print("result     a valid PNG, copied byte for byte, inside every cap")
         return 0
     except (OSError, ValueError) as exc:
         print("error: %s" % exc, file=sys.stderr)
